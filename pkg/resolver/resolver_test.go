@@ -35,7 +35,7 @@ func model(ns, name string, refs ...v1alpha1.ExternalProviderRef) *v1alpha1.Exte
 
 func ref(name, target, path string) v1alpha1.ExternalProviderRef {
 	return v1alpha1.ExternalProviderRef{
-		Ref:         v1alpha1.NameReference{Name: name},
+		Ref:         v1alpha1.ExternalProviderReference{Name: name},
 		TargetModel: target,
 		APIFormat:   "openai-chat",
 		Path:        path,

@@ -456,7 +456,7 @@ func TestValidateProviderAuthenticationStrategies(t *testing.T) {
 func TestDependentEventsEnqueueOnlyAffectedNamespaceModels(t *testing.T) {
 	modelA := &v1alpha1.ExternalModel{
 		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "tenant-a"},
-		Spec:       v1alpha1.ExternalModelSpec{ExternalProviderRefs: []v1alpha1.ExternalProviderRef{{Ref: v1alpha1.NameReference{Name: "provider"}}}},
+		Spec:       v1alpha1.ExternalModelSpec{ExternalProviderRefs: []v1alpha1.ExternalProviderRef{{Ref: v1alpha1.ExternalProviderReference{Name: "provider"}}}},
 	}
 	modelC := &v1alpha1.ExternalModel{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "tenant-a"}}
 	modelB := &v1alpha1.ExternalModel{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "tenant-b"}}
@@ -603,7 +603,7 @@ func TestReconcileCreatesTransportAndOverlayFromOneRouteSet(t *testing.T) {
 	model := &v1alpha1.ExternalModel{
 		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "tenant-a", UID: "model-uid"},
 		Spec: v1alpha1.ExternalModelSpec{ModelName: "client-model", ExternalProviderRefs: []v1alpha1.ExternalProviderRef{{
-			Ref: v1alpha1.NameReference{Name: provider.Name}, TargetModel: "gpt", APIFormat: "openai-chat", Path: "/v1/chat/completions",
+			Ref: v1alpha1.ExternalProviderReference{Name: provider.Name}, TargetModel: "gpt", APIFormat: "openai-chat", Path: "/v1/chat/completions",
 		}}},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "tenant-a"}, Data: map[string][]byte{"api-key": []byte("must-not-be-published")}}
@@ -745,7 +745,7 @@ func TestReconcileRecoversProviderAfterSecretDeletionAndRestoration(t *testing.T
 	model := &v1alpha1.ExternalModel{
 		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "tenant-a", UID: "model-uid"},
 		Spec: v1alpha1.ExternalModelSpec{ExternalProviderRefs: []v1alpha1.ExternalProviderRef{{
-			Ref: v1alpha1.NameReference{Name: provider.Name}, TargetModel: "gpt", APIFormat: "openai-chat", Path: "/v1/chat/completions",
+			Ref: v1alpha1.ExternalProviderReference{Name: provider.Name}, TargetModel: "gpt", APIFormat: "openai-chat", Path: "/v1/chat/completions",
 		}}},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "tenant-a"}, Data: map[string][]byte{"api-key": []byte("secret")}}
@@ -1135,7 +1135,7 @@ func reconcilerFixture(t *testing.T) (*Reconciler, *v1alpha1.ExternalModel) {
 	model := &v1alpha1.ExternalModel{
 		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "tenant-a", UID: "model-uid"},
 		Spec: v1alpha1.ExternalModelSpec{ExternalProviderRefs: []v1alpha1.ExternalProviderRef{{
-			Ref: v1alpha1.NameReference{Name: provider.Name}, TargetModel: "gpt",
+			Ref: v1alpha1.ExternalProviderReference{Name: provider.Name}, TargetModel: "gpt",
 			APIFormat: "openai-chat", Path: "/v1/chat/completions",
 		}}},
 	}
