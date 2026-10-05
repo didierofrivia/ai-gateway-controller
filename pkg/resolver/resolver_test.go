@@ -222,6 +222,48 @@ func withWeight(r v1alpha1.ExternalProviderRef, w int) v1alpha1.ExternalProvider
 	return r
 }
 
+func TestResolve_ProviderNamespace(t *testing.T) {
+	for name, resolve := range map[string]func([]*v1alpha1.ExternalModel, []*v1alpha1.ExternalProvider) (*ResolvedRouteSet, error){
+		"serving": Resolve, "preload": ResolveAll,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, namespace := range []string{"", "models", "shared"} {
+				t.Run("namespace="+namespace, func(t *testing.T) {
+					r := ref("provider", "gpt", "/v1/chat/completions")
+					r.Ref.Namespace = namespace
+					set, err := resolve([]*v1alpha1.ExternalModel{model("models", "model", r)}, []*v1alpha1.ExternalProvider{
+						provider("models", "provider", PhaseReady, "local.example.com", nil),
+						provider("shared", "provider", PhaseReady, "foreign.example.com", nil),
+					})
+					if namespace == "shared" {
+						if !errors.Is(err, ErrNoRoutes) || len(set.Routes()) != 0 {
+							t.Fatalf("foreign reference resolved: set=%#v err=%v", set, err)
+						}
+						if len(set.Models[0].Skips) != 1 || set.Models[0].Skips[0].Reason != SkipRefNamespaceUnsupported {
+							t.Fatalf("foreign reference skips = %#v", set.Models[0].Skips)
+						}
+					} else if err != nil || len(set.Routes()) != 1 || set.Routes()[0].Endpoint != "local.example.com" {
+						t.Fatalf("local reference: set=%#v err=%v", set, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestResolve_UnsupportedNamespaceKeepsLocalRefs(t *testing.T) {
+	foreign := ref("provider", "foreign-target", "/v1/chat/completions")
+	foreign.Ref.Namespace = "shared"
+	m := model("models", "model", foreign, ref("provider", "local-target", "/v1/chat/completions"))
+	p := provider("models", "provider", PhaseReady, "local.example.com", nil)
+	for _, resolve := range []func([]*v1alpha1.ExternalModel, []*v1alpha1.ExternalProvider) (*ResolvedRouteSet, error){Resolve, ResolveAll} {
+		set, err := resolve([]*v1alpha1.ExternalModel{m}, []*v1alpha1.ExternalProvider{p})
+		if err != nil || len(set.Routes()) != 1 || set.Routes()[0].TargetModel != "local-target" {
+			t.Fatalf("mixed references: set=%#v err=%v", set, err)
+		}
+	}
+}
+
 func TestResolve_NamespaceIsolation(t *testing.T) {
 	// A provider with the right name in another namespace must NOT resolve.
 	m := model("ns1", "m", ref("prov-a", "t", "/v1"))

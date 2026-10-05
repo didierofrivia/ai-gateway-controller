@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -836,6 +837,117 @@ func TestReconcileRecoversProviderAfterTransientTransportFailure(t *testing.T) {
 	}
 	if provider.Status.Phase != resolver.PhaseReady {
 		t.Fatalf("provider phase after transport recovery = %q, want Ready", provider.Status.Phase)
+	}
+}
+
+func TestProviderNamespaceUpdateRemovesStaleServingState(t *testing.T) {
+	for _, keepSibling := range []bool{false, true} {
+		t.Run(map[bool]string{false: "last model", true: "remaining sibling"}[keepSibling], func(t *testing.T) {
+			r, model := reconcilerFixture(t)
+			r.GatewayNamespace = "gateway-system"
+			req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(model)}
+			if keepSibling {
+				sibling := model.DeepCopy()
+				sibling.Name, sibling.UID = "sibling", "sibling-uid"
+				sibling.ResourceVersion = ""
+				if err := r.Create(context.Background(), sibling); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+			otherRule := providerDestinationRuleForTenant(resolver.Route{Provider: "provider", Endpoint: "other.example.com"}, r.GatewayNamespace, "other-tenant")
+			if err := r.Create(context.Background(), &otherRule); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Get(context.Background(), req.NamespacedName, model); err != nil {
+				t.Fatal(err)
+			}
+			model.Spec.ExternalProviderRefs[0].Ref.Namespace = "shared"
+			if err := r.Update(context.Background(), model); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(context.Background(), req); !errors.Is(err, resolver.ErrNoRoutes) {
+				t.Fatalf("unsupported reference error = %v, want ErrNoRoutes", err)
+			}
+			var rejected v1alpha1.ExternalModel
+			if err := r.Get(context.Background(), req.NamespacedName, &rejected); err != nil {
+				t.Fatal(err)
+			}
+			if rejected.Status.Phase != "Failed" || rejected.Status.HTTPRouteName != "" || rejected.Status.OverlayDigest != "" || rejected.Status.OverlayGeneration != 0 {
+				t.Fatalf("unsupported reference retained serving status: %#v", rejected.Status)
+			}
+			if !hasConditionReason(rejected.Status.Conditions, conditionReady, reasonNoRoutes) {
+				t.Fatalf("unsupported reference conditions = %#v", rejected.Status.Conditions)
+			}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(&otherRule), &otherRule); err != nil {
+				t.Fatalf("unrelated tenant transport was removed: %v", err)
+			}
+			route := &unstructured.Unstructured{}
+			route.SetGroupVersionKind(schema.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "HTTPRoute"})
+			if err := r.Get(context.Background(), client.ObjectKey{Namespace: model.Namespace, Name: modelRouteName(model.Name)}, route); !apierrors.IsNotFound(err) {
+				t.Fatalf("stale model route = %v, want NotFound", err)
+			}
+			var overlay corev1.ConfigMap
+			err := r.Get(context.Background(), client.ObjectKey{Namespace: model.Namespace, Name: "routing-overlay"}, &overlay)
+			if keepSibling {
+				if err != nil {
+					t.Fatal(err)
+				}
+				var env envelope.Envelope
+				if err := json.Unmarshal([]byte(overlay.Data["routing-overlay.json"]), &env); err != nil {
+					t.Fatal(err)
+				}
+				if len(env.Overlay.Candidates) != 1 || env.Overlay.Candidates[0].Name != "sibling" {
+					t.Fatalf("remaining overlay candidates = %#v", env.Overlay.Candidates)
+				}
+				if err := r.Get(context.Background(), client.ObjectKey{Namespace: model.Namespace, Name: modelRouteName("sibling")}, route); err != nil {
+					t.Fatalf("remaining sibling route = %v", err)
+				}
+			} else if !apierrors.IsNotFound(err) {
+				t.Fatalf("stale overlay = %v, want NotFound", err)
+			}
+
+			rejected.Spec.ExternalProviderRefs[0].Ref.Namespace = model.Namespace
+			if err := r.Update(context.Background(), &rejected); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("explicit local reference recovery: %v", err)
+			}
+			if err := r.Get(context.Background(), req.NamespacedName, &rejected); err != nil {
+				t.Fatal(err)
+			}
+			if rejected.Status.Phase != resolver.PhaseReady || rejected.Status.HTTPRouteName != modelRouteName(model.Name) {
+				t.Fatalf("local reference did not recover: %#v", rejected.Status)
+			}
+		})
+	}
+}
+
+func TestRemoveUnsupportedModelRoutePreservesOtherOwnership(t *testing.T) {
+	for _, otherController := range []bool{false, true} {
+		t.Run(map[bool]string{false: "another model", true: "another controller"}[otherController], func(t *testing.T) {
+			r, model := reconcilerFixture(t)
+			route := modelHTTPRoute(resolver.Route{Model: model.Name, Provider: "provider"}, model.Namespace, r.GatewayName, r.GatewayNamespace)
+			owner := model.DeepCopy()
+			if otherController {
+				route.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "other-controller"})
+			} else {
+				owner.UID = "other-model-uid"
+			}
+			setOwnerReference(&route, owner)
+			if err := r.Create(context.Background(), &route); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.removeUnsupportedModelRoute(context.Background(), model); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(&route), &route); err != nil {
+				t.Fatalf("route with different ownership was removed: %v", err)
+			}
+		})
 	}
 }
 
