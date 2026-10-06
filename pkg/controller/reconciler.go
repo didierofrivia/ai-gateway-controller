@@ -277,10 +277,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		providerOwners[providers.Items[i].Name] = &providers.Items[i]
 	}
 	set, err := resolver.Resolve(modelPtrs, providerPtrs)
-	unsupportedModelMessage := unsupportedProviderNamespaceMessage(set, req.String())
-	// Reuse the empty-route cleanup path for newly unsupported references,
-	// while preserving existing failure behavior for legacy-shaped models.
-	if err != nil && !canCleanupUnsupportedRoutes(err, unsupportedModelMessage) {
+	if err != nil {
 		reason := reasonReconcileFailed
 		if errors.Is(err, resolver.ErrNoRoutes) {
 			reason = reasonProviderNotReady
@@ -304,13 +301,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		if err := r.enableExternalModelRoutes(ctx, tenant.ID(ait.GetName()), req.Namespace, gatewayName, gatewayNamespace, nil); err != nil {
 			return reconcile.Result{}, err
 		}
-		if cleanupErr := r.removeUnsupportedModelRoute(ctx, &model); cleanupErr != nil {
+		if cleanupErr := r.cleanupTransport(ctx, req.Namespace, gatewayNamespace, nil); cleanupErr != nil {
 			return reconcile.Result{}, cleanupErr
 		}
 		if cleanupErr := r.cleanupOverlay(ctx, req.Namespace); cleanupErr != nil {
 			return reconcile.Result{}, cleanupErr
 		}
-		if statusErr := r.updateModelStatus(ctx, &model, false, reasonNoRoutes, unsupportedModelMessage, nil); statusErr != nil {
+		message := "no ExternalModel provider references resolved to a Ready provider"
+		if statusErr := r.updateModelStatus(ctx, &model, false, reasonNoRoutes, message, nil); statusErr != nil {
 			return reconcile.Result{}, statusErr
 		}
 		return reconcile.Result{}, resolver.ErrNoRoutes
@@ -358,55 +356,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, err
 	}
 
-	return reconcile.Result{}, r.updateResolvedModelStatus(ctx, &model, &result.Envelope, unsupportedModelMessage)
-}
-
-func canCleanupUnsupportedRoutes(err error, message string) bool {
-	return errors.Is(err, resolver.ErrNoRoutes) && message != ""
-}
-
-func unsupportedProviderNamespaceMessage(set *resolver.ResolvedRouteSet, modelRef string) string {
-	if set == nil {
-		return ""
+	message := fmt.Sprintf("distributed routing overlay digest %s generation %d", result.Envelope.Revision.Value, result.Envelope.Provenance.SourceGeneration)
+	if err := r.updateModelStatus(ctx, &model, true, reasonReconciled, message, &result.Envelope); err != nil {
+		return reconcile.Result{}, err
 	}
-	for _, model := range set.Models {
-		if model.ModelRef != modelRef || len(model.Routes) != 0 {
-			continue
-		}
-		for _, skip := range model.Skips {
-			if skip.Reason == resolver.SkipRefNamespaceUnsupported {
-				return skip.Message
-			}
-		}
-	}
-	return ""
-}
-
-// removeUnsupportedModelRoute stops serving the rejected model without
-// pruning provider resources that can be shared with other models or tenants.
-func (r *Reconciler) removeUnsupportedModelRoute(ctx context.Context, model *v1alpha1.ExternalModel) error {
-	route := &unstructured.Unstructured{}
-	route.SetGroupVersionKind(schema.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "HTTPRoute"})
-	key := client.ObjectKey{Namespace: model.Namespace, Name: modelRouteName(model.Name)}
-	if err := r.Get(ctx, key, route); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	if route.GetLabels()["app.kubernetes.io/managed-by"] != "ai-gateway-controller" || !metav1.IsControlledBy(route, model) {
-		return nil
-	}
-	uid, resourceVersion := route.GetUID(), route.GetResourceVersion()
-	return client.IgnoreNotFound(r.Delete(ctx, route, client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}))
-}
-
-func (r *Reconciler) updateResolvedModelStatus(ctx context.Context, model *v1alpha1.ExternalModel, env *envelope.Envelope, unsupportedModelMessage string) error {
-	if unsupportedModelMessage != "" {
-		if err := r.updateModelStatus(ctx, model, false, reasonNoRoutes, unsupportedModelMessage, nil); err != nil {
-			return err
-		}
-		return resolver.ErrNoRoutes
-	}
-	message := fmt.Sprintf("distributed routing overlay digest %s generation %d", env.Revision.Value, env.Provenance.SourceGeneration)
-	return r.updateModelStatus(ctx, model, true, reasonReconciled, message, env)
+	return reconcile.Result{}, nil
 }
 
 // cleanupUnselectedModel releases only resources owned by this controller when
@@ -916,11 +870,6 @@ func (r *Reconciler) updateModelStatus(ctx context.Context, m *v1alpha1.External
 		}
 	} else {
 		m.Status.Phase = "Failed"
-		if reason == reasonNoRoutes {
-			m.Status.HTTPRouteName = ""
-			m.Status.OverlayDigest = ""
-			m.Status.OverlayGeneration = 0
-		}
 		setCondition(&m.Status.Conditions, conditionOverlayDistributed, metav1.ConditionFalse, reason, message)
 	}
 	setCondition(&m.Status.Conditions, conditionReady, boolStatus(ready), reason, message)

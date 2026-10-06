@@ -267,17 +267,15 @@ doc comment for the full state machine this mirrors. In short:
   `internal/controller/aigateway/aigateway.go`; a real vendoring/deploy run
   from this repo's side has not been confirmed yet.
 
-## Dependencies
-
-### Inference API schema extension
+## Inference API schema extension
 
 [RHOAIENG-90800](https://redhat.atlassian.net/browse/RHOAIENG-90800) is a bounded,
 additive extension to ODH-ADR-MS-0005's frozen migration baseline. AGC's
 `api/inference/v1alpha1` types and generated `config/crd/bases` schemas source
 the new fields. Retain the ADR's local API mirrors and CI drift checks;
 MaaS installs the inference CRDs, and operator manifest pins propagate them.
-Review this extension with AGC, MaaS and API owners separately from the
-migration baseline.
+AGC, MaaS and API owners agreed this extension separately from the migration
+baseline.
 
 `spec.gatewayRefs` is optional, with 1–16 unique namespace/name pairs when
 present. Omission retains tenant-local resolution without a global default.
@@ -293,6 +291,8 @@ auth uses the provider-local Secret; an override uses the model-local Secret.
 Secret references remain name-only. Preserve the installed schema's accepted
 names and `auth.type: simple`; schema acceptance does not add auth behavior.
 The schema compatibility test pins the legacy MaaS validation baseline.
+Until cross-namespace authorization is implemented, the resolver skips a
+provider reference to another namespace and never substitutes a local provider.
 
 Schema installation alone does not enable serving these fields. Attachment
 ownership, status publication, provider authorization/credential delivery,
@@ -300,6 +300,8 @@ and MaaS selection belong to the follow-up stories. Activation requires
 aligned packaged schemas and serving implementations, verified tenant
 cleanup/claim ownership (including shared models/providers), and the serving,
 status, MaaS and installed-package checks.
+
+## Dependencies
 
 No cross-repo Go type imports (no dependency on `ai-gateway-operator/api/...`
 or `models-as-a-service/...`): `pkg/tenant` watches `MaasTenantConfig` and
