@@ -1601,7 +1601,7 @@ func TestReconcileDeletingModelHonorsIPPSwitchWithSurvivingSibling(t *testing.T)
 	sibling := &v1alpha1.ExternalModel{
 		ObjectMeta: metav1.ObjectMeta{Name: "surviving-model", Namespace: "tenant-a", UID: "sibling-uid"},
 		Spec: v1alpha1.ExternalModelSpec{ExternalProviderRefs: []v1alpha1.ExternalProviderRef{{
-			Ref: v1alpha1.NameReference{Name: "provider"}, TargetModel: "gpt",
+			Ref: v1alpha1.ExternalProviderReference{Name: "provider"}, TargetModel: "gpt",
 			APIFormat: "openai-chat", Path: "/v1/chat/completions",
 		}}},
 	}
@@ -1675,7 +1675,7 @@ func TestDeletingModelDoesNotRebuildSiblingRoutesBeforeSteadyHandoff(t *testing.
 			sibling := &v1alpha1.ExternalModel{
 				ObjectMeta: metav1.ObjectMeta{Name: "sibling", Namespace: "tenant-a", UID: "sibling-uid"},
 				Spec: v1alpha1.ExternalModelSpec{ExternalProviderRefs: []v1alpha1.ExternalProviderRef{{
-					Ref: v1alpha1.NameReference{Name: "provider"}, TargetModel: "gpt",
+					Ref: v1alpha1.ExternalProviderReference{Name: "provider"}, TargetModel: "gpt",
 					APIFormat: "openai-chat", Path: "/v1/chat/completions",
 				}}},
 			}
@@ -1745,7 +1745,7 @@ func TestActiveProviderGatewayMoveRemovesOnlyPriorTenantCopies(t *testing.T) {
 	model := &v1alpha1.ExternalModel{
 		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "tenant-a", UID: "model-uid"},
 		Spec: v1alpha1.ExternalModelSpec{ExternalProviderRefs: []v1alpha1.ExternalProviderRef{{
-			Ref: v1alpha1.NameReference{Name: "provider"}, TargetModel: "gpt",
+			Ref: v1alpha1.ExternalProviderReference{Name: "provider"}, TargetModel: "gpt",
 			APIFormat: "openai-chat", Path: "/v1/chat/completions",
 		}}},
 	}
