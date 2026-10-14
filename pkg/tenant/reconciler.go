@@ -85,6 +85,10 @@ type Reconciler struct {
 	ManifestPath string
 	// Image replaces the vendored overlay's placeholder container image.
 	Image string
+	// MeteringURL is the external metering service endpoint. When set, the
+	// external_metering filter (with identity_header_guard) is wired into the
+	// post-auth ExtProc chains for MaaS usage/billing. Empty disables metering.
+	MeteringURL string
 	// SkipNetworkPolicy omits the controller-managed payload-processing
 	// NetworkPolicy when an installation supplies equivalent networking and the
 	// target namespace disallows this controller from creating policies. It is
