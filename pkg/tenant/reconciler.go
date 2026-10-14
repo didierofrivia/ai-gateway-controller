@@ -416,11 +416,16 @@ func (r *Reconciler) reconcilePraxis(ctx context.Context, log logr.Logger, mtc *
 		return ctrl.Result{}, fmt.Errorf("split ExternalModel ExtProc resources: %w", err)
 	}
 	if serving {
-		if err := configureExternalModelExtProc(resources, tenantNamespace, runtimeCandidates); err != nil {
+		if err := configureExternalModelExtProc(resources, tenantNamespace, r.MeteringURL, runtimeCandidates); err != nil {
 			return ctrl.Result{}, fmt.Errorf("configure ExternalModel ExtProc: %w", err)
 		}
 	} else {
 		resources = RemoveExternalModelResources(resources, tenantID)
+	}
+	// Meter ordinary MaaS/KServe traffic on the shared post-auth chain. This is
+	// independent of ExternalModel presence and a no-op when metering is off.
+	if err := configureBaseExtProcMetering(resources, tenantID, r.MeteringURL); err != nil {
+		return ctrl.Result{}, fmt.Errorf("configure base ExtProc metering: %w", err)
 	}
 	if r.SkipNetworkPolicy {
 		filtered := make([]unstructured.Unstructured, 0, len(resources))
