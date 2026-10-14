@@ -31,6 +31,14 @@ data:
       allow_unbounded_body: true
 
   # Post-auth (IPP) Praxis chain: full processing pipeline.
+  #
+  # When the controller is started with --metering-url (or METERING_URL), it
+  # prepends the MaaS metering filters to this chain at render time:
+  #   - filter: identity_header_guard   # capture+strip x-maas-* into metadata
+  #   - filter: external_metering        # emit maas-gateway usage CloudEvents
+  # Metering lives here (post-auth), not in the BBR chain, because the x-maas-*
+  # identity headers are injected by Authorino after BBR and billing needs the
+  # response path. See issue #99 and pkg/tenant/extproc.go.
   extproc.yaml: |
     server:
       grpc_address: "0.0.0.0:9004"
