@@ -373,6 +373,7 @@ func (r *Reconciler) reconcilePraxis(ctx context.Context, log logr.Logger, mtc *
 		return ctrl.Result{}, err
 	}
 	var runtimeCandidates []envelope.Candidate
+	var runtimeProviderTypes []string
 	if hasModels {
 		_, requiredProviders, providerErr := r.providersForTenant(ctx, tenantNamespace, gatewayName, gatewayNamespace)
 		if providerErr != nil {
@@ -386,7 +387,7 @@ func (r *Reconciler) reconcilePraxis(ctx context.Context, log logr.Logger, mtc *
 			log.Info("routing overlay is not ready for ExternalModel ExtProc", "reason", reason, "namespace", tenantNamespace)
 			return ctrl.Result{RequeueAfter: notReadyRequeueInterval}, nil
 		}
-		runtimeCandidates, err = r.runtimeCandidates(ctx, tenantNamespace, gatewayName, gatewayNamespace)
+		runtimeCandidates, runtimeProviderTypes, err = r.runtimeCandidates(ctx, tenantNamespace, gatewayName, gatewayNamespace)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -399,7 +400,7 @@ func (r *Reconciler) reconcilePraxis(ctx context.Context, log logr.Logger, mtc *
 		return ctrl.Result{}, fmt.Errorf("split ExternalModel ExtProc resources: %w", err)
 	}
 	if hasModels {
-		if err := configureExternalModelExtProc(resources, tenantNamespace, r.MeteringURL, runtimeCandidates); err != nil {
+		if err := configureExternalModelExtProc(resources, tenantNamespace, r.MeteringURL, runtimeCandidates, runtimeProviderTypes); err != nil {
 			return ctrl.Result{}, fmt.Errorf("configure ExternalModel ExtProc: %w", err)
 		}
 	} else {
@@ -583,14 +584,19 @@ func (r *Reconciler) providersForTenant(ctx context.Context, namespace, gatewayN
 	return result, availableRequired, nil
 }
 
-func (r *Reconciler) runtimeCandidates(ctx context.Context, namespace, gatewayName, gatewayNamespace string) ([]envelope.Candidate, error) {
+// runtimeCandidates returns the ExtProc routing candidates and the distinct
+// upstream ExternalProvider.spec.provider values in the chain (sorted). The
+// provider types are not carried on envelope.Candidate — that is the
+// content-addressed overlay wire format — so they are returned alongside for the
+// post-auth chain's per-provider token_count metering filters.
+func (r *Reconciler) runtimeCandidates(ctx context.Context, namespace, gatewayName, gatewayNamespace string) ([]envelope.Candidate, []string, error) {
 	models, err := r.ownExternalModels(ctx, namespace, gatewayName, gatewayNamespace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var providers v1alpha1.ExternalProviderList
 	if err := r.Client.List(ctx, &providers, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("list ExternalProviders for ExtProc runtime configuration: %w", err)
+		return nil, nil, fmt.Errorf("list ExternalProviders for ExtProc runtime configuration: %w", err)
 	}
 	modelPtrs := make([]*v1alpha1.ExternalModel, 0, len(models))
 	for i := range models {
@@ -602,13 +608,14 @@ func (r *Reconciler) runtimeCandidates(ctx context.Context, namespace, gatewayNa
 	}
 	runtimeSet, err := resolver.ResolveAll(modelPtrs, providerPtrs)
 	if err != nil {
-		return nil, fmt.Errorf("resolve ExtProc runtime provider set: %w", err)
+		return nil, nil, fmt.Errorf("resolve ExtProc runtime provider set: %w", err)
 	}
 	candidates := make([]envelope.Candidate, 0, len(runtimeSet.Routes()))
+	providerTypeSet := map[string]bool{}
 	for _, route := range runtimeSet.Routes() {
 		strategy, err := envelope.StrategyFor(route)
 		if err != nil {
-			return nil, fmt.Errorf("resolve ExtProc runtime credential for model %s provider %s: %w", route.Model, route.Provider, err)
+			return nil, nil, fmt.Errorf("resolve ExtProc runtime credential for model %s provider %s: %w", route.Model, route.Provider, err)
 		}
 		candidate := envelope.Candidate{
 			Cluster: route.Cluster, StableID: envelope.CandidateStableID(route.Model, route.Provider),
@@ -621,8 +628,14 @@ func (r *Reconciler) runtimeCandidates(ctx context.Context, namespace, gatewayNa
 			}
 		}
 		candidates = append(candidates, candidate)
+		providerTypeSet[route.ProviderType] = true
 	}
-	return candidates, nil
+	providerTypes := make([]string, 0, len(providerTypeSet))
+	for providerType := range providerTypeSet {
+		providerTypes = append(providerTypes, providerType)
+	}
+	slices.Sort(providerTypes)
+	return candidates, providerTypes, nil
 }
 
 func (r *Reconciler) routingOverlayReady(ctx context.Context, namespace string, requiredProviders map[string]bool) (bool, string, error) {

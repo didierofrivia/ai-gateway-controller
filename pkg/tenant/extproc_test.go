@@ -41,7 +41,7 @@ func TestConfigureExternalModelExtProcProjectsReferencesAndTrustedHandoff(t *tes
 			},
 		},
 	}
-	if err := configureExternalModelExtProc(resources, "tenant-a", "", candidates); err != nil {
+	if err := configureExternalModelExtProc(resources, "tenant-a", "", candidates, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, found, err := unstructured.NestedStringMap(resources[0].Object, "data")
@@ -86,7 +86,7 @@ func TestExternalModelConfigOmitsCredentialFilterWithoutReferences(t *testing.T)
 			}}},
 		}},
 	}
-	if err := configureExternalModelExtProc(resources, "tenant-a", "", nil); err != nil {
+	if err := configureExternalModelExtProc(resources, "tenant-a", "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, _, err := unstructured.NestedStringMap(resources[0].Object, "data")
@@ -104,7 +104,7 @@ func TestExternalModelConfigOmitsCredentialFilterWithoutReferences(t *testing.T)
 
 func TestExternalModelConfigWiresMeteringWhenConfigured(t *testing.T) {
 	credentials := []extprocCredential{}
-	config, err := extprocPostAuthConfig(nil, credentials, "http://metering.svc:8080")
+	config, err := extprocPostAuthConfig(nil, credentials, "http://metering.svc:8080", []string{"anthropic", "openai"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,23 +117,45 @@ func TestExternalModelConfigWiresMeteringWhenConfigured(t *testing.T) {
 		"identity_metadata_namespace: identity",
 		"prefix: x-maas-",
 		"metadata_namespace: identity",
+		"filter: token_count",
+		"provider: anthropic",
+		"provider: openai",
 	} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("metered post-auth config missing %q:\n%s", want, config)
 		}
 	}
 	// identity_header_guard must capture/strip identity before routing forwards
-	// the request upstream.
+	// the request upstream, and token_count must sit after external_metering (so
+	// response-path extraction precedes the metering read) and before routing.
 	guard := strings.Index(config, "identity_header_guard")
 	meter := strings.Index(config, "external_metering")
+	token := strings.Index(config, "token_count")
 	route := strings.Index(config, "intelligent_route")
-	if guard >= meter || meter >= route {
-		t.Fatalf("metering filters must precede intelligent_route (guard=%d meter=%d route=%d):\n%s", guard, meter, route, config)
+	if guard >= meter || meter >= token || token >= route {
+		t.Fatalf("filter order must be guard<meter<token_count<route (guard=%d meter=%d token=%d route=%d):\n%s", guard, meter, token, route, config)
+	}
+}
+
+func TestExternalModelConfigRejectsUnmappableProviderForMetering(t *testing.T) {
+	_, err := extprocPostAuthConfig(nil, nil, "http://metering.svc:8080", []string{"myspecialcloud"})
+	if err == nil || !strings.Contains(err.Error(), "token_count ProviderKind") {
+		t.Fatalf("expected unmappable-provider rejection, got %v", err)
+	}
+}
+
+func TestExternalModelConfigOmitsTokenCountWhenMeteringUnset(t *testing.T) {
+	config, err := extprocPostAuthConfig(nil, nil, "", []string{"openai"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(config, "token_count") {
+		t.Fatalf("token_count must be omitted when metering is off:\n%s", config)
 	}
 }
 
 func TestExternalModelConfigOmitsMeteringWhenUnset(t *testing.T) {
-	config, err := extprocPostAuthConfig(nil, nil, "")
+	config, err := extprocPostAuthConfig(nil, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +186,7 @@ func TestConfigureBaseExtProcMeteringInjectsIntoSharedChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := data["extproc.yaml"]
-	for _, want := range []string{"external_metering", "identity_header_guard", "request_id", "http://metering.svc:8080", "maas-gateway"} {
+	for _, want := range []string{"external_metering", "identity_header_guard", "request_id", "http://metering.svc:8080", "maas-gateway", "token_count", "provider: openai"} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("shared chain missing %q:\n%s", want, config)
 		}
@@ -173,9 +195,14 @@ func TestConfigureBaseExtProcMeteringInjectsIntoSharedChain(t *testing.T) {
 	if data["pre-extproc.yaml"] != "pre" {
 		t.Fatalf("pre-extproc.yaml must not be modified, got %q", data["pre-extproc.yaml"])
 	}
-	// The guard must be prepended ahead of the pre-existing request_id filter.
+	// The guard must be prepended ahead of the pre-existing request_id filter,
+	// and token_count must follow external_metering so the response-path read
+	// sees the extracted counts.
 	if strings.Index(config, "identity_header_guard") > strings.Index(config, "request_id") {
 		t.Fatalf("metering must precede request_id in the shared chain:\n%s", config)
+	}
+	if meter, token := strings.Index(config, "external_metering"), strings.Index(config, "token_count"); meter >= token {
+		t.Fatalf("token_count must follow external_metering in the shared chain (meter=%d token=%d):\n%s", meter, token, config)
 	}
 	hash, found, err := unstructured.NestedString(resources[1].Object, "spec", "template", "metadata", "annotations", "ai-gateway-controller.opendatahub.io/extproc-config-sha256")
 	if err != nil || !found || hash == "" {
