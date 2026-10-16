@@ -61,12 +61,12 @@ type extprocCredential struct {
 // MaaS/KServe post-auth workload is intentionally not modified. Secret values
 // are never read: kubelet projects the referenced Secret into this workload and
 // credential_inject reads the mounted file at request time.
-func configureExternalModelExtProc(resources []unstructured.Unstructured, namespace, meteringURL string, candidates []envelope.Candidate, providerTypes []string) error {
+func configureExternalModelExtProc(resources []unstructured.Unstructured, namespace, meteringURL string, candidates []envelope.Candidate, providerKinds []string) error {
 	credentials, err := extprocCredentials(namespace, candidates)
 	if err != nil {
 		return err
 	}
-	config, err := extprocPostAuthConfig(candidates, credentials, meteringURL, providerTypes)
+	config, err := extprocPostAuthConfig(candidates, credentials, meteringURL, providerKinds)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func extprocCredentials(namespace string, candidates []envelope.Candidate) ([]ex
 	return credentials, nil
 }
 
-func extprocPostAuthConfig(candidates []envelope.Candidate, credentials []extprocCredential, meteringURL string, providerTypes []string) (string, error) {
+func extprocPostAuthConfig(candidates []envelope.Candidate, credentials []extprocCredential, meteringURL string, providerKinds []string) (string, error) {
 	clusterSet := make(map[string]bool, len(candidates))
 	for _, candidate := range candidates {
 		clusterSet[candidate.Cluster] = true
@@ -205,15 +205,13 @@ func extprocPostAuthConfig(candidates []envelope.Candidate, credentials []extpro
 		return "", err
 	}
 	// token_count feeds external_metering the per-provider token.* metadata it
-	// needs; it is only wired when metering is on, one filter per distinct
-	// upstream provider so each response format is parsed.
+	// needs; it is only wired when metering is on. providerKinds are the distinct
+	// Praxis token_count ProviderKinds for the chain, already resolved (from the
+	// same envelope authority as the routing strategy), deduped, and sorted by
+	// runtimeCandidates — one filter per kind so each response format is parsed.
 	var tokenCount string
 	if meteringURL != "" {
-		kinds, err := praxisTokenCountProviders(providerTypes)
-		if err != nil {
-			return "", err
-		}
-		if tokenCount, err = filterEntriesYAML(tokenCountFilterEntries(kinds)); err != nil {
+		if tokenCount, err = filterEntriesYAML(tokenCountFilterEntries(providerKinds)); err != nil {
 			return "", err
 		}
 	}
@@ -329,50 +327,6 @@ func tokenCountFilterEntries(providerKinds []string) []any {
 		})
 	}
 	return entries
-}
-
-// praxisTokenCountProviders maps the MaaS ExternalProvider.spec.provider values
-// in a chain to the distinct praxis token_count ProviderKind values, sorted for
-// a deterministic render.
-func praxisTokenCountProviders(providerTypes []string) ([]string, error) {
-	seen := map[string]bool{}
-	kinds := make([]string, 0, len(providerTypes))
-	for _, providerType := range providerTypes {
-		kind, err := praxisTokenCountProvider(providerType)
-		if err != nil {
-			return nil, err
-		}
-		if seen[kind] {
-			continue
-		}
-		seen[kind] = true
-		kinds = append(kinds, kind)
-	}
-	sort.Strings(kinds)
-	return kinds, nil
-}
-
-// praxisTokenCountProvider maps a MaaS ExternalProvider.spec.provider value to
-// the praxis token_count ProviderKind whose response parser matches it. The
-// MaaS vocabulary (openai/anthropic/azure/aws-bedrock/vertex) differs from the
-// praxis ProviderKind enum, so vertex→google and aws-bedrock→bedrock. An
-// unmapped provider is a hard error: wiring metering without a matching
-// token_count would silently report zero token usage.
-func praxisTokenCountProvider(providerType string) (string, error) {
-	switch providerType {
-	case "openai":
-		return "openai", nil
-	case "anthropic":
-		return "anthropic", nil
-	case "azure":
-		return "azure", nil
-	case "vertex":
-		return "google", nil
-	case "aws-bedrock":
-		return "bedrock", nil
-	default:
-		return "", fmt.Errorf("provider %q has no token_count ProviderKind; metering would book zero tokens", providerType)
-	}
 }
 
 // configureBaseExtProcMetering injects the metering filters into the shared

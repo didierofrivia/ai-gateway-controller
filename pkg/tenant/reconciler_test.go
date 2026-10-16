@@ -108,7 +108,8 @@ func TestDeletedProviderReferenceDoesNotBlockTenantOverlayReadiness(t *testing.T
 	}
 	live, later := provider("live"), provider("later")
 	fakeClient := fake.NewClientBuilder().WithScheme(mtcSchemeForTests()).WithObjects(model, live).Build()
-	r := &Reconciler{Client: fakeClient}
+	// Metering on so runtimeCandidates resolves the per-chain token_count kinds.
+	r := &Reconciler{Client: fakeClient, MeteringURL: "http://metering.svc:8080"}
 	writeOverlay := func(providers ...*v1alpha1.ExternalProvider) {
 		t.Helper()
 		set, err := resolver.Resolve([]*v1alpha1.ExternalModel{model}, providers)
@@ -167,12 +168,12 @@ func TestDeletedProviderReferenceDoesNotBlockTenantOverlayReadiness(t *testing.T
 	if ready, reason, err := r.routingOverlayReady(ctx, namespace, required); err != nil || !ready {
 		t.Fatalf("overlay after later provider publication: ready=%t reason=%q err=%v", ready, reason, err)
 	}
-	candidates, providerTypes, err := r.runtimeCandidates(ctx, namespace, "gateway", "gateway-system")
+	candidates, tokenKinds, err := r.runtimeCandidates(ctx, namespace, "gateway", "gateway-system")
 	if err != nil || len(candidates) != 2 {
 		t.Fatalf("ExtProc runtime candidates = %#v, err=%v; want live and later", candidates, err)
 	}
-	if len(providerTypes) != 1 || providerTypes[0] != "openai" {
-		t.Fatalf("ExtProc runtime provider types = %#v, want [openai] deduped", providerTypes)
+	if len(tokenKinds) != 1 || tokenKinds[0] != "openai" {
+		t.Fatalf("ExtProc runtime token_count kinds = %#v, want [openai] deduped", tokenKinds)
 	}
 }
 
