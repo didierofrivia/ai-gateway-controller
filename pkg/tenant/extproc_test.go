@@ -137,13 +137,6 @@ func TestExternalModelConfigWiresMeteringWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestExternalModelConfigRejectsUnmappableProviderForMetering(t *testing.T) {
-	_, err := extprocPostAuthConfig(nil, nil, "http://metering.svc:8080", []string{"myspecialcloud"})
-	if err == nil || !strings.Contains(err.Error(), "token_count ProviderKind") {
-		t.Fatalf("expected unmappable-provider rejection, got %v", err)
-	}
-}
-
 func TestExternalModelConfigOmitsTokenCountWhenMeteringUnset(t *testing.T) {
 	config, err := extprocPostAuthConfig(nil, nil, "", []string{"openai"})
 	if err != nil {

@@ -373,7 +373,7 @@ func (r *Reconciler) reconcilePraxis(ctx context.Context, log logr.Logger, mtc *
 		return ctrl.Result{}, err
 	}
 	var runtimeCandidates []envelope.Candidate
-	var runtimeProviderTypes []string
+	var runtimeTokenKinds []string
 	if hasModels {
 		_, requiredProviders, providerErr := r.providersForTenant(ctx, tenantNamespace, gatewayName, gatewayNamespace)
 		if providerErr != nil {
@@ -387,7 +387,7 @@ func (r *Reconciler) reconcilePraxis(ctx context.Context, log logr.Logger, mtc *
 			log.Info("routing overlay is not ready for ExternalModel ExtProc", "reason", reason, "namespace", tenantNamespace)
 			return ctrl.Result{RequeueAfter: notReadyRequeueInterval}, nil
 		}
-		runtimeCandidates, runtimeProviderTypes, err = r.runtimeCandidates(ctx, tenantNamespace, gatewayName, gatewayNamespace)
+		runtimeCandidates, runtimeTokenKinds, err = r.runtimeCandidates(ctx, tenantNamespace, gatewayName, gatewayNamespace)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -400,7 +400,7 @@ func (r *Reconciler) reconcilePraxis(ctx context.Context, log logr.Logger, mtc *
 		return ctrl.Result{}, fmt.Errorf("split ExternalModel ExtProc resources: %w", err)
 	}
 	if hasModels {
-		if err := configureExternalModelExtProc(resources, tenantNamespace, r.MeteringURL, runtimeCandidates, runtimeProviderTypes); err != nil {
+		if err := configureExternalModelExtProc(resources, tenantNamespace, r.MeteringURL, runtimeCandidates, runtimeTokenKinds); err != nil {
 			return ctrl.Result{}, fmt.Errorf("configure ExternalModel ExtProc: %w", err)
 		}
 	} else {
@@ -584,11 +584,13 @@ func (r *Reconciler) providersForTenant(ctx context.Context, namespace, gatewayN
 	return result, availableRequired, nil
 }
 
-// runtimeCandidates returns the ExtProc routing candidates and the distinct
-// upstream ExternalProvider.spec.provider values in the chain (sorted). The
-// provider types are not carried on envelope.Candidate — that is the
-// content-addressed overlay wire format — so they are returned alongside for the
-// post-auth chain's per-provider token_count metering filters.
+// runtimeCandidates returns the ExtProc routing candidates and, when metering is
+// enabled, the distinct Praxis token_count ProviderKinds for the chain (sorted).
+// The kinds are not carried on envelope.Candidate — that is the content-addressed
+// overlay wire format — so they are returned alongside for the post-auth chain's
+// per-provider token_count metering filters. They are resolved from the same
+// envelope qualification authority as the routing strategy (see
+// envelope.TokenCountProviderKind) so metering never drifts from routing.
 func (r *Reconciler) runtimeCandidates(ctx context.Context, namespace, gatewayName, gatewayNamespace string) ([]envelope.Candidate, []string, error) {
 	models, err := r.ownExternalModels(ctx, namespace, gatewayName, gatewayNamespace)
 	if err != nil {
@@ -611,7 +613,7 @@ func (r *Reconciler) runtimeCandidates(ctx context.Context, namespace, gatewayNa
 		return nil, nil, fmt.Errorf("resolve ExtProc runtime provider set: %w", err)
 	}
 	candidates := make([]envelope.Candidate, 0, len(runtimeSet.Routes()))
-	providerTypeSet := map[string]bool{}
+	tokenKindSet := map[string]bool{}
 	for _, route := range runtimeSet.Routes() {
 		strategy, err := envelope.StrategyFor(route)
 		if err != nil {
@@ -628,14 +630,25 @@ func (r *Reconciler) runtimeCandidates(ctx context.Context, namespace, gatewayNa
 			}
 		}
 		candidates = append(candidates, candidate)
-		providerTypeSet[route.ProviderType] = true
+		// token_count is opt-in with metering; resolve each route's ProviderKind
+		// from the same envelope authority as the strategy, and only when metering
+		// is on, so an unmetered provider lacking a kind never blocks routing.
+		if r.MeteringURL != "" {
+			kind, err := envelope.TokenCountProviderKind(route)
+			if err != nil {
+				return nil, nil, fmt.Errorf("resolve ExtProc token_count provider for model %s provider %s: %w", route.Model, route.Provider, err)
+			}
+			if kind != "" {
+				tokenKindSet[kind] = true
+			}
+		}
 	}
-	providerTypes := make([]string, 0, len(providerTypeSet))
-	for providerType := range providerTypeSet {
-		providerTypes = append(providerTypes, providerType)
+	tokenKinds := make([]string, 0, len(tokenKindSet))
+	for kind := range tokenKindSet {
+		tokenKinds = append(tokenKinds, kind)
 	}
-	slices.Sort(providerTypes)
-	return candidates, providerTypes, nil
+	slices.Sort(tokenKinds)
+	return candidates, tokenKinds, nil
 }
 
 func (r *Reconciler) routingOverlayReady(ctx context.Context, namespace string, requiredProviders map[string]bool) (bool, string, error) {
