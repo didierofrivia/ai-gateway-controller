@@ -61,12 +61,12 @@ type extprocCredential struct {
 // MaaS/KServe post-auth workload is intentionally not modified. Secret values
 // are never read: kubelet projects the referenced Secret into this workload and
 // credential_inject reads the mounted file at request time.
-func configureExternalModelExtProc(resources []unstructured.Unstructured, namespace, meteringURL string, candidates []envelope.Candidate) error {
+func configureExternalModelExtProc(resources []unstructured.Unstructured, namespace, meteringURL string, candidates []envelope.Candidate, providerTypes []string) error {
 	credentials, err := extprocCredentials(namespace, candidates)
 	if err != nil {
 		return err
 	}
-	config, err := extprocPostAuthConfig(candidates, credentials, meteringURL)
+	config, err := extprocPostAuthConfig(candidates, credentials, meteringURL, providerTypes)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func extprocCredentials(namespace string, candidates []envelope.Candidate) ([]ex
 	return credentials, nil
 }
 
-func extprocPostAuthConfig(candidates []envelope.Candidate, credentials []extprocCredential, meteringURL string) (string, error) {
+func extprocPostAuthConfig(candidates []envelope.Candidate, credentials []extprocCredential, meteringURL string, providerTypes []string) (string, error) {
 	clusterSet := make(map[string]bool, len(candidates))
 	for _, candidate := range candidates {
 		clusterSet[candidate.Cluster] = true
@@ -204,13 +204,30 @@ func extprocPostAuthConfig(candidates []envelope.Candidate, credentials []extpro
 	if err != nil {
 		return "", err
 	}
+	// token_count feeds external_metering the per-provider token.* metadata it
+	// needs; it is only wired when metering is on, one filter per distinct
+	// upstream provider so each response format is parsed.
+	var tokenCount string
+	if meteringURL != "" {
+		kinds, err := praxisTokenCountProviders(providerTypes)
+		if err != nil {
+			return "", err
+		}
+		if tokenCount, err = filterEntriesYAML(tokenCountFilterEntries(kinds)); err != nil {
+			return "", err
+		}
+	}
 	var b strings.Builder
 	b.WriteString("server:\n  grpc_address: \"0.0.0.0:9004\"\n  health_address: \"0.0.0.0:50052\"\n")
 	b.WriteString("  metrics_address: \"0.0.0.0:9090\"\n  tls:\n    mode: self_signed\n\n")
 	// Metering runs first so identity_header_guard captures and strips the
 	// x-maas-* headers before intelligent_route forwards the request upstream.
+	// token_count sits after external_metering (response hooks run in reverse,
+	// so extraction happens before metering reads the counts) and before
+	// intelligent_route.
 	b.WriteString("filter_chains:\n  - name: post-auth\n    filters:\n")
 	b.WriteString(metering)
+	b.WriteString(tokenCount)
 	b.WriteString("      - filter: intelligent_route\n")
 	b.WriteString("        overlay_file: /etc/praxis/routing/routing-overlay.json\n")
 	b.WriteString("        model_header: X-Gateway-Model-Name\n        provider_hop_clusters: [")
@@ -237,8 +254,10 @@ func extprocPostAuthConfig(candidates []envelope.Candidate, credentials []extpro
 // post-auth Praxis chain. identity_header_guard must precede external_metering:
 // it captures the Authorino-injected x-maas-* identity headers into
 // filter_metadata (the namespace external_metering reads) and strips them from
-// the upstream request. Returns nil when no metering endpoint is configured,
-// which disables metering entirely (opt-in).
+// the upstream request. external_metering additionally needs the token.* usage
+// metadata written by a companion token_count filter (see tokenCountFilterEntries);
+// callers append those after these entries. Returns nil when no metering endpoint
+// is configured, which disables metering entirely (opt-in).
 func meteringFilterEntries(meteringURL string) []any {
 	if meteringURL == "" {
 		return nil
@@ -268,13 +287,19 @@ func meteringFilterEntries(meteringURL string) []any {
 // to sit under a filter chain's "filters:" key (six-space indent). Returns the
 // empty string when metering is not configured.
 func meteringFiltersYAML(meteringURL string) (string, error) {
-	entries := meteringFilterEntries(meteringURL)
+	return filterEntriesYAML(meteringFilterEntries(meteringURL))
+}
+
+// filterEntriesYAML renders filter entries as YAML list items indented to sit
+// under a filter chain's "filters:" key (six-space indent). Returns the empty
+// string for an empty slice.
+func filterEntriesYAML(entries []any) (string, error) {
 	if len(entries) == 0 {
 		return "", nil
 	}
 	raw, err := yaml.Marshal(entries)
 	if err != nil {
-		return "", fmt.Errorf("marshal metering filters: %w", err)
+		return "", fmt.Errorf("marshal ExtProc filters: %w", err)
 	}
 	var b strings.Builder
 	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
@@ -283,6 +308,71 @@ func meteringFiltersYAML(meteringURL string) (string, error) {
 		b.WriteString("\n")
 	}
 	return b.String(), nil
+}
+
+// baseChainTokenCountProvider is the token_count ProviderKind for the shared
+// KServe post-auth chain, which serves OpenAI-compatible (vLLM) inference.
+const baseChainTokenCountProvider = "openai"
+
+// tokenCountFilterEntries returns one token_count filter per distinct provider,
+// in the given order. external_metering has no independent usage parser: it
+// reads the token.* filter_metadata that token_count writes, so without a
+// token_count whose provider matches the response format metering books zero
+// tokens. token_count must be declared AFTER external_metering — response hooks
+// run in reverse chain order, so extraction then executes before metering reads.
+func tokenCountFilterEntries(providerKinds []string) []any {
+	entries := make([]any, 0, len(providerKinds))
+	for _, kind := range providerKinds {
+		entries = append(entries, map[string]any{
+			"filter":   "token_count",
+			"provider": kind,
+		})
+	}
+	return entries
+}
+
+// praxisTokenCountProviders maps the MaaS ExternalProvider.spec.provider values
+// in a chain to the distinct praxis token_count ProviderKind values, sorted for
+// a deterministic render.
+func praxisTokenCountProviders(providerTypes []string) ([]string, error) {
+	seen := map[string]bool{}
+	kinds := make([]string, 0, len(providerTypes))
+	for _, providerType := range providerTypes {
+		kind, err := praxisTokenCountProvider(providerType)
+		if err != nil {
+			return nil, err
+		}
+		if seen[kind] {
+			continue
+		}
+		seen[kind] = true
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds, nil
+}
+
+// praxisTokenCountProvider maps a MaaS ExternalProvider.spec.provider value to
+// the praxis token_count ProviderKind whose response parser matches it. The
+// MaaS vocabulary (openai/anthropic/azure/aws-bedrock/vertex) differs from the
+// praxis ProviderKind enum, so vertex→google and aws-bedrock→bedrock. An
+// unmapped provider is a hard error: wiring metering without a matching
+// token_count would silently report zero token usage.
+func praxisTokenCountProvider(providerType string) (string, error) {
+	switch providerType {
+	case "openai":
+		return "openai", nil
+	case "anthropic":
+		return "anthropic", nil
+	case "azure":
+		return "azure", nil
+	case "vertex":
+		return "google", nil
+	case "aws-bedrock":
+		return "bedrock", nil
+	default:
+		return "", fmt.Errorf("provider %q has no token_count ProviderKind; metering would book zero tokens", providerType)
+	}
 }
 
 // configureBaseExtProcMetering injects the metering filters into the shared
@@ -337,12 +427,17 @@ func configureBaseExtProcMetering(resources []unstructured.Unstructured, tenantI
 
 // injectMeteringFilters parses a Praxis ExtProc config document and prepends the
 // metering filters to its first filter chain. Prepending keeps identity_header_guard
-// ahead of any filter that reads identity from request headers.
+// ahead of any filter that reads identity from request headers. token_count is
+// appended after external_metering (still ahead of the pre-existing filters) so
+// external_metering has the token.* metadata to report; the shared chain serves
+// OpenAI-compatible KServe traffic, so one token_count with the openai provider
+// covers it.
 func injectMeteringFilters(config, meteringURL string) (string, error) {
 	entries := meteringFilterEntries(meteringURL)
 	if len(entries) == 0 {
 		return config, nil
 	}
+	entries = append(entries, tokenCountFilterEntries([]string{baseChainTokenCountProvider})...)
 	var doc map[string]any
 	if err := yaml.Unmarshal([]byte(config), &doc); err != nil {
 		return "", fmt.Errorf("parse ExtProc config: %w", err)
